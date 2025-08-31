@@ -1,33 +1,77 @@
 import SwiftUI
 import Photos
 
+struct UploadItem: Identifiable, Hashable {
+    let id = UUID()
+    let identifier: String
+    let fileName: String
+    var progress: Double = 0
+    var isCompleted: Bool = false
+    var isFailed: Bool = false
+}
+
 struct ContentView: View {
     @State private var statusMessage = "Idle"
     @State private var isUploading = false
     @State private var uploadedFiles = Set<String>()
-    @State private var currentUploadProgress: Double = 0
-    @State private var currentFileName: String = ""
-    
     @State private var deleteAfterUpload = false
     @State private var stopAfterCurrent = false
-    
+    @State private var uploadItems: [UploadItem] = []
+    @State private var currentAssets: [PHAsset] = []
+
     let serverURL = URL(string: "http://192.168.4.21:3001/upload")!
     let username = "admin"
     let password = "change_this_password"
+
+    private var completedCount: Int { uploadItems.filter { $0.isCompleted }.count }
+    private var overallProgress: Double {
+        guard !uploadItems.isEmpty else { return 0 }
+        let total = uploadItems.reduce(0.0) { $0 + $1.progress }
+        return total / Double(uploadItems.count)
+    }
 
     var body: some View {
         VStack(spacing: 20) {
             Text("iPhone → Mac Backup").font(.title)
             Text(statusMessage).foregroundColor(.gray)
-            
+
             if isUploading {
-                VStack {
-                    Text("Uploading: \(currentFileName)")
-                    ProgressView(value: currentUploadProgress)
-                        .progressViewStyle(LinearProgressViewStyle())
-                        .frame(width: 250)
-                    
-                    Button("Stop After Current File") {
+                VStack(spacing: 16) {
+                    VStack {
+                        Text("\(completedCount) of \(uploadItems.count) files uploaded")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                        ProgressView(value: overallProgress)
+                            .progressViewStyle(LinearProgressViewStyle())
+                            .frame(height: 8)
+                            .accentColor(completedCount == uploadItems.count ? .green : .blue)
+                    }
+                    .padding(.horizontal)
+
+                    List {
+                        ForEach(uploadItems.sorted { !$0.isCompleted && $1.isCompleted }) { item in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(item.fileName).lineLimit(1)
+                                    if !item.isCompleted && !item.isFailed {
+                                        ProgressView(value: item.progress)
+                                            .progressViewStyle(LinearProgressViewStyle())
+                                    }
+                                }
+                                Spacer()
+                                if item.isCompleted {
+                                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                                }
+                                if item.isFailed {
+                                    Image(systemName: "xmark.circle.fill").foregroundColor(.red)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .frame(height: 300)
+
+                    Button("Stop After Current Batch") {
                         stopAfterCurrent = true
                     }
                     .padding()
@@ -36,10 +80,9 @@ struct ContentView: View {
                     .cornerRadius(10)
                 }
             }
-            
-            Toggle("Delete file after upload", isOn: $deleteAfterUpload)
-                .padding()
-            
+
+            Toggle("Delete file after upload", isOn: $deleteAfterUpload).padding()
+
             Button(action: startBackup) {
                 Text(isUploading ? "Uploading..." : "Start Backup")
                     .padding()
@@ -48,133 +91,138 @@ struct ContentView: View {
                     .cornerRadius(10)
             }
             .disabled(isUploading)
-            
-            if !uploadedFiles.isEmpty {
-                List(Array(uploadedFiles), id: \.self) { file in
-                    Text(file)
-                }
-                .frame(height: 200)
-            }
         }
         .padding()
-        .onAppear {
-            loadUploadedFiles()
-        }
+        .onAppear { loadUploadedFiles() }
     }
-    
+
+    // MARK: - Backup Methods
+
     func startBackup() {
+        stopAfterCurrent = false
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
             guard status == .authorized else {
                 DispatchQueue.main.async { statusMessage = "Full access required" }
                 return
             }
-            DispatchQueue.global(qos: .userInitiated).async {
-                DispatchQueue.main.async {
-                    isUploading = true
-                    statusMessage = "Enumerating albums..."
-                    // Keep device awake while uploading
-                    UIApplication.shared.isIdleTimerDisabled = true
-                }
-                let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
-                processAlbums(albums)
+            DispatchQueue.main.async {
+                isUploading = true
+                statusMessage = "Enumerating albums..."
+                UIApplication.shared.isIdleTimerDisabled = true
             }
+
+            let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
+            processAlbums(albums)
         }
     }
-    
+
     func processAlbums(_ albums: PHFetchResult<PHAssetCollection>, index: Int = 0) {
         guard index < albums.count else {
             DispatchQueue.main.async {
                 isUploading = false
                 statusMessage = "Backup completed"
-                currentUploadProgress = 0
-                currentFileName = ""
                 stopAfterCurrent = false
-                // Allow sleep
                 UIApplication.shared.isIdleTimerDisabled = false
             }
             return
         }
+
         if stopAfterCurrent {
             DispatchQueue.main.async {
                 isUploading = false
                 statusMessage = "Stopped"
-                currentUploadProgress = 0
-                currentFileName = ""
                 stopAfterCurrent = false
-                // Allow sleep
                 UIApplication.shared.isIdleTimerDisabled = false
             }
             return
         }
-        
+
         let album = albums.object(at: index)
         let albumName = album.localizedTitle ?? "UnknownAlbum"
-        let assets = PHAsset.fetchAssets(in: album, options: nil)
-        
-        var videoAssets: [PHAsset] = []
-        var photoAssets: [PHAsset] = []
-        for i in 0..<assets.count {
-            let asset = assets.object(at: i)
-            if asset.mediaType == .video { videoAssets.append(asset) }
-            else if asset.mediaType == .image { photoAssets.append(asset) }
-        }
-        let combinedAssets = videoAssets + photoAssets
-        
-        processAssetsSequentially(combinedAssets, albumName: albumName) {
-            self.processAlbums(albums, index: index + 1)
-        }
-    }
-    
-    func processAssetsSequentially(
-        _ assets: [PHAsset],
-        albumName: String,
-        completion: @escaping () -> Void,
-        index: Int = 0
-    ) {
-        guard index < assets.count else { completion(); return }
-        let asset = assets[index]
+        let assetsFetch = PHAsset.fetchAssets(in: album, options: nil)
+        var assetsArray: [PHAsset] = []
 
-        DispatchQueue.main.async {
-            let identifier = "\(albumName)/\(asset.localIdentifier)"
-            
-            if uploadedFiles.contains(identifier) {
-                processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
+        for i in 0..<assetsFetch.count { assetsArray.append(assetsFetch.object(at: i)) }
+
+        if assetsArray.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.processAlbums(albums, index: index + 1)
+            }
+            return
+        }
+
+        // Filter valid assets with URL
+        let options = PHContentEditingInputRequestOptions()
+        options.isNetworkAccessAllowed = true
+        var validAssets: [PHAsset] = []
+        let group = DispatchGroup()
+
+        for asset in assetsArray {
+            group.enter()
+            asset.requestContentEditingInput(with: options) { input, _ in
+                if input?.fullSizeImageURL != nil || input?.audiovisualAsset != nil {
+                    validAssets.append(asset)
+                }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) {
+            guard !validAssets.isEmpty else {
+                self.processAlbums(albums, index: index + 1)
                 return
             }
 
-            currentFileName = asset.localIdentifier
-            currentUploadProgress = 0
-            statusMessage = "Uploading \(asset.localIdentifier)"
-            
-            uploadAsset(asset: asset, albumName: albumName) { success in
-                if success {
-                    uploadedFiles.insert(identifier)
-                    saveUploadedFiles()
-                    if deleteAfterUpload {
-                        deleteAsset(asset: asset)
-                    }
-                }
+            self.currentAssets = validAssets
+            self.uploadItems = validAssets.map { UploadItem(identifier: "\(albumName)/\($0.localIdentifier)", fileName: $0.localIdentifier) }
+            self.statusMessage = "Preparing \(validAssets.count) files..."
 
-                if stopAfterCurrent {
-                    isUploading = false
-                    statusMessage = "Stopped"
-                    currentUploadProgress = 0
-                    currentFileName = ""
-                    stopAfterCurrent = false
-                    UIApplication.shared.isIdleTimerDisabled = false
-                } else {
-                    processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
-                }
+            self.processAssetsConcurrently(validAssets, albumName: albumName) {
+                self.processAlbums(albums, index: index + 1)
             }
         }
     }
-    
-    func uploadAsset(asset: PHAsset, albumName: String, completion: @escaping (Bool) -> Void) {
+
+    func processAssetsConcurrently(_ assets: [PHAsset], albumName: String, completion: @escaping () -> Void) {
+        let group = DispatchGroup()
+        let semaphore = DispatchSemaphore(value: 3)
+
+        for asset in assets {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                semaphore.wait()
+                self.uploadAsset(asset: asset, albumName: albumName) { progress, completed, failed in
+                    DispatchQueue.main.async {
+                        if let index = self.uploadItems.firstIndex(where: { $0.identifier == "\(albumName)/\(asset.localIdentifier)" }) {
+                            self.uploadItems[index].progress = progress
+                            if completed {
+                                self.uploadItems[index].isCompleted = true
+                                self.uploadedFiles.insert("\(albumName)/\(asset.localIdentifier)")
+                                self.saveUploadedFiles()
+                                if self.deleteAfterUpload { self.deleteAsset(asset: asset) }
+                            }
+                            if failed { self.uploadItems[index].isFailed = true }
+                        }
+                    }
+                    if completed || failed {
+                        semaphore.signal()
+                        group.leave()
+                    }
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            completion()
+        }
+    }
+
+    func uploadAsset(asset: PHAsset, albumName: String, progressHandler: @escaping (Double, Bool, Bool) -> Void) {
         let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = true
         asset.requestContentEditingInput(with: options) { input, _ in
             guard let url = input?.fullSizeImageURL ?? input?.audiovisualAsset?.value(forKey: "URL") as? URL else {
-                completion(false)
+                progressHandler(0, true, true)
                 return
             }
 
@@ -187,48 +235,60 @@ struct ContentView: View {
             let boundary = "Boundary-\(UUID().uuidString)"
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-            var body = Data()
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"album\"\r\n\r\n".data(using: .utf8)!)
-            body.append("\(albumName)\r\n".data(using: .utf8)!)
-
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"photos\"; filename=\"\(url.lastPathComponent)\"\r\n".data(using: .utf8)!)
+            var bodyPrefix = Data()
+            bodyPrefix.append("--\(boundary)\r\n".data(using: .utf8)!)
+            bodyPrefix.append("Content-Disposition: form-data; name=\"album\"\r\n\r\n".data(using: .utf8)!)
+            bodyPrefix.append("\(albumName)\r\n".data(using: .utf8)!)
+            bodyPrefix.append("--\(boundary)\r\n".data(using: .utf8)!)
+            bodyPrefix.append("Content-Disposition: form-data; name=\"photos\"; filename=\"\(url.lastPathComponent)\"\r\n".data(using: .utf8)!)
             let mimeType = asset.mediaType == .video ? "video/mp4" : "image/jpeg"
-            body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
+            bodyPrefix.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
 
-            let fileStream = InputStream(url: url)!
-            fileStream.open()
-            let bufferSize = 1024 * 64
-            var buffer = [UInt8](repeating: 0, count: bufferSize)
-            var totalBytesRead: Int64 = 0
-            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
+            let bodySuffix = "\r\n--\(boundary)--\r\n".data(using: .utf8)!
+            let tempFileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            guard FileManager.default.createFile(atPath: tempFileURL.path, contents: nil, attributes: nil) else {
+                progressHandler(0, true, true)
+                return
+            }
 
-            while fileStream.hasBytesAvailable {
-                let read = fileStream.read(&buffer, maxLength: bufferSize)
-                if read > 0 {
-                    body.append(contentsOf: buffer[0..<read])
-                    totalBytesRead += Int64(read)
-                    DispatchQueue.main.async {
-                        self.currentUploadProgress = Double(totalBytesRead) / Double(fileSize)
+            if let outStream = OutputStream(url: tempFileURL, append: false),
+               let fileStream = InputStream(url: url) {
+                outStream.open()
+                fileStream.open()
+
+                bodyPrefix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodyPrefix.count) }
+
+                let bufferSize = 64 * 1024
+                var buffer = [UInt8](repeating: 0, count: bufferSize)
+                let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
+                var totalBytes: Int64 = 0
+
+                while fileStream.hasBytesAvailable {
+                    let read = fileStream.read(&buffer, maxLength: bufferSize)
+                    if read > 0 {
+                        _ = outStream.write(buffer, maxLength: read)
+                        totalBytes += Int64(read)
+                        DispatchQueue.main.async {
+                            progressHandler(Double(totalBytes) / Double(fileSize), false, false)
+                        }
                     }
                 }
-            }
-            fileStream.close()
-            body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
-            URLSession.shared.uploadTask(with: request, from: body) { data, response, error in
-                if let error = error {
-                    print("Upload error: \(error)")
-                    completion(false)
-                    return
-                }
+                bodySuffix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodySuffix.count) }
+
+                outStream.close()
+                fileStream.close()
+            }
+
+            let task = URLSession.shared.uploadTask(with: request, fromFile: tempFileURL) { _, response, _ in
+                defer { try? FileManager.default.removeItem(at: tempFileURL) }
                 if let resp = response as? HTTPURLResponse, resp.statusCode == 200 {
-                    completion(true)
+                    progressHandler(1.0, true, false)
                 } else {
-                    completion(false)
+                    progressHandler(0.0, true, true)
                 }
-            }.resume()
+            }
+            task.resume()
         }
     }
 
