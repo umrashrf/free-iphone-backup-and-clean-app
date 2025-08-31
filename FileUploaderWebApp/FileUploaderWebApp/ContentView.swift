@@ -125,45 +125,46 @@ struct ContentView: View {
         }
     }
     
-    func processAssetsSequentially(_ assets: [PHAsset], albumName: String, completion: @escaping () -> Void, index: Int = 0) {
+    func processAssetsSequentially(
+        _ assets: [PHAsset],
+        albumName: String,
+        completion: @escaping () -> Void,
+        index: Int = 0
+    ) {
         guard index < assets.count else { completion(); return }
         let asset = assets[index]
-        let identifier = "\(albumName)/\(asset.localIdentifier)"
-
-        if uploadedFiles.contains(identifier) {
-            processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
-            return
-        }
 
         DispatchQueue.main.async {
+            let identifier = "\(albumName)/\(asset.localIdentifier)"
+            
+            if uploadedFiles.contains(identifier) {
+                processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
+                return
+            }
+
             currentFileName = asset.localIdentifier
             currentUploadProgress = 0
             statusMessage = "Uploading \(asset.localIdentifier)"
-        }
-
-        uploadAsset(asset: asset, albumName: albumName) { success in
-            if success {
-                DispatchQueue.main.async {
-                    self.uploadedFiles.insert(identifier)
-                    self.saveUploadedFiles()
+            
+            uploadAsset(asset: asset, albumName: albumName) { success in
+                if success {
+                    uploadedFiles.insert(identifier)
+                    saveUploadedFiles()
                     if deleteAfterUpload {
                         deleteAsset(asset: asset)
                     }
                 }
-            }
 
-            if stopAfterCurrent {
-                DispatchQueue.main.async {
+                if stopAfterCurrent {
                     isUploading = false
                     statusMessage = "Stopped"
                     currentUploadProgress = 0
                     currentFileName = ""
                     stopAfterCurrent = false
-                    // Allow sleep
                     UIApplication.shared.isIdleTimerDisabled = false
+                } else {
+                    processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
                 }
-            } else {
-                self.processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
             }
         }
     }
