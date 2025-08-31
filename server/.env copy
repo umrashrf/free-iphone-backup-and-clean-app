@@ -1,0 +1,9 @@
+PORT=3001
+# Path to external drive mount/folder where you want photos saved.
+# Example on mac: /Volumes/YourExternalDrive/iPhoneBackups
+UPLOAD_DIR=/Volumes/YourExternalDrive/iPhoneBackups
+# Optional Basic Auth (username:password) to protect the endpoint while on your LAN
+BASIC_AUTH_USER=admin
+BASIC_AUTH_PASS=change_this_password
+# Maximum single file size in bytes (e.g. 1GB)
+MAX_FILE_SIZE=1024000000
