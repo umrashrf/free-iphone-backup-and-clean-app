@@ -5,8 +5,9 @@ struct ContentView: View {
     @State private var statusMessage = "Idle"
     @State private var isUploading = false
     @State private var uploadedFiles = Set<String>() // track uploaded files
+    @State private var currentUploadProgress: Double = 0 // Progress for the current file
+    @State private var currentFileName: String = "" // Current file being uploaded
 
-    // Change this to your server IP + port
     let serverURL = URL(string: "http://192.168.4.21:3001/upload")!
     let username = "admin"
     let password = "change_this_password"
@@ -15,6 +16,16 @@ struct ContentView: View {
         VStack(spacing: 20) {
             Text("iPhone → Mac Backup").font(.title)
             Text(statusMessage).foregroundColor(.gray)
+            
+            if isUploading {
+                VStack {
+                    Text("Uploading: \(currentFileName)")
+                    ProgressView(value: currentUploadProgress)
+                        .progressViewStyle(LinearProgressViewStyle())
+                        .frame(width: 250)
+                }
+            }
+            
             Button(action: startBackup) {
                 Text(isUploading ? "Uploading..." : "Start Backup")
                     .padding()
@@ -23,6 +34,14 @@ struct ContentView: View {
                     .cornerRadius(10)
             }
             .disabled(isUploading)
+
+            // List of uploaded files
+            if !uploadedFiles.isEmpty {
+                List(Array(uploadedFiles), id: \.self) { file in
+                    Text(file)
+                }
+                .frame(height: 200)
+            }
         }
         .padding()
         .onAppear {
@@ -30,7 +49,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Backup Start
     func startBackup() {
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
             guard status == .authorized else {
@@ -45,17 +63,15 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Process albums sequentially
     func processAlbums(_ albums: PHFetchResult<PHAssetCollection>, index: Int = 0) {
         guard index < albums.count else {
-            DispatchQueue.main.async { isUploading = false; statusMessage = "Backup completed" }
+            DispatchQueue.main.async { isUploading = false; statusMessage = "Backup completed"; currentUploadProgress = 0; currentFileName = "" }
             return
         }
         let album = albums.object(at: index)
         let albumName = album.localizedTitle ?? "UnknownAlbum"
         let assets = PHAsset.fetchAssets(in: album, options: nil)
 
-        // Videos first
         var videoAssets: [PHAsset] = []
         var photoAssets: [PHAsset] = []
         for i in 0..<assets.count {
@@ -70,29 +86,34 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Process assets sequentially in an album
     func processAssetsSequentially(_ assets: [PHAsset], albumName: String, completion: @escaping () -> Void, index: Int = 0) {
         guard index < assets.count else { completion(); return }
         let asset = assets[index]
         let identifier = "\(albumName)/\(asset.localIdentifier)"
 
         if uploadedFiles.contains(identifier) {
-            print("Skipping already uploaded: \(identifier)")
             processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
             return
         }
 
+        DispatchQueue.main.async {
+            currentFileName = asset.localIdentifier
+            currentUploadProgress = 0
+            statusMessage = "Uploading \(asset.localIdentifier)"
+        }
+
         uploadAsset(asset: asset, albumName: albumName) { success in
             if success {
-                self.uploadedFiles.insert(identifier)
-                self.saveUploadedFiles()
-                deleteAsset(asset: asset)
+                DispatchQueue.main.async {
+                    self.uploadedFiles.insert(identifier)
+                    self.saveUploadedFiles()
+                    deleteAsset(asset: asset)
+                }
             }
             self.processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
         }
     }
 
-    // MARK: - Upload a single asset
     func uploadAsset(asset: PHAsset, albumName: String, completion: @escaping (Bool) -> Void) {
         let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = true
@@ -111,7 +132,6 @@ struct ContentView: View {
             let boundary = "Boundary-\(UUID().uuidString)"
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-            // Multipart header
             var body = Data()
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"album\"\r\n\r\n".data(using: .utf8)!)
@@ -127,15 +147,20 @@ struct ContentView: View {
             fileStream.open()
             let bufferSize = 1024 * 64
             var buffer = [UInt8](repeating: 0, count: bufferSize)
+            var totalBytesRead: Int64 = 0
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
+
             while fileStream.hasBytesAvailable {
                 let read = fileStream.read(&buffer, maxLength: bufferSize)
                 if read > 0 {
                     body.append(contentsOf: buffer[0..<read])
+                    totalBytesRead += Int64(read)
+                    DispatchQueue.main.async {
+                        self.currentUploadProgress = Double(totalBytesRead) / Double(fileSize)
+                    }
                 }
             }
             fileStream.close()
-
-            // Close multipart
             body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
             URLSession.shared.uploadTask(with: request, from: body) { data, response, error in
@@ -145,7 +170,6 @@ struct ContentView: View {
                     return
                 }
                 if let resp = response as? HTTPURLResponse, resp.statusCode == 200 {
-                    print("Uploaded \(url.lastPathComponent) from album \(albumName)")
                     completion(true)
                 } else {
                     completion(false)
@@ -154,7 +178,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Delete asset after upload
     func deleteAsset(asset: PHAsset) {
         PHPhotoLibrary.shared().performChanges({
             PHAssetChangeRequest.deleteAssets([asset] as NSFastEnumeration)
@@ -164,7 +187,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Persist uploaded files
     func saveUploadedFiles() {
         UserDefaults.standard.set(Array(uploadedFiles), forKey: "uploadedFiles")
     }
