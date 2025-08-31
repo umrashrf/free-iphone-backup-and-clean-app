@@ -18,7 +18,6 @@ struct ContentView: View {
     @State private var deleteAfterUpload = false
     @State private var stopAfterCurrent = false
     @State private var uploadItems: [UploadItem] = []  // all uploads
-    @State private var totalToUpload: Int = 0
     @State private var totalUploaded: Int = 0
     @State private var retryCounts: [String: Int] = [:]
     @State private var useDirectUpload = true
@@ -33,8 +32,8 @@ struct ContentView: View {
     let password = "change_this_password"
 
     var overallProgress: Double {
-        guard totalToUpload > 0 else { return 0 }
-        return Double(totalUploaded) / Double(totalToUpload)
+        guard totalPhotoCount > 0 else { return 0 }
+        return Double(totalUploaded) / Double(totalPhotoCount)
     }
 
     var body: some View {
@@ -54,7 +53,7 @@ struct ContentView: View {
             if isUploading {
                 VStack(spacing: 16) {
                     VStack {
-                        Text("\(totalUploaded) of \(totalToUpload) files uploaded")
+                        Text("\(totalUploaded) of \(totalPhotoCount) files uploaded")
                             .font(.subheadline)
                             .foregroundColor(.gray)
                         ProgressView(value: overallProgress)
@@ -110,7 +109,6 @@ struct ContentView: View {
 
     func startBackup() {
         stopAfterCurrent = false
-        totalToUpload = 0
         totalUploaded = 0
         totalPhotoCount = 0
         uploadItems = []
@@ -194,8 +192,6 @@ struct ContentView: View {
                 self.processAlbums(albums, index: index + 1, completion: completion)
                 return
             }
-
-            self.totalToUpload += filteredAssets.count
 
             self.processAssetsIncremental(filteredAssets, albumName: albumName) {
                 if self.deleteAfterUpload { self.deleteAlbum(album) }
@@ -358,29 +354,34 @@ struct ContentView: View {
             DispatchQueue.global(qos: .userInitiated).async {
                 var request = URLRequest(url: serverURL)
                 request.httpMethod = "POST"
+                
+                // Basic Auth
                 let loginString = "\(username):\(password)"
                 let base64Login = loginString.data(using: .utf8)?.base64EncodedString() ?? ""
                 request.setValue("Basic \(base64Login)", forHTTPHeaderField: "Authorization")
                 
+                // Boundary for multipart
                 let boundary = "Boundary-\(UUID().uuidString)"
+                let lineBreak = "\r\n"
                 request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
                 
-                let bodyPrefix = """
-                --\(boundary)\r
-                Content-Disposition: form-data; name="album"\r\n\r
-                \(albumName)\r
-                --\(boundary)\r
-                Content-Disposition: form-data; name="photos"; filename="\(url.lastPathComponent)"\r
-                Content-Type: \(asset.mediaType == .video ? "video/mp4" : "image/jpeg")\r\n\r
-                """.data(using: .utf8)!
+                // Body prefix & suffix
+                let bodyPrefix = NSMutableData()
+                bodyPrefix.append("--\(boundary)\(lineBreak)".data(using: .utf8)!)
+                bodyPrefix.append("Content-Disposition: form-data; name=\"album\"\(lineBreak + lineBreak)".data(using: .utf8)!)
+                bodyPrefix.append("\(albumName)\(lineBreak)".data(using: .utf8)!)
+                bodyPrefix.append("--\(boundary)\(lineBreak)".data(using: .utf8)!)
+                bodyPrefix.append("Content-Disposition: form-data; name=\"photos\"; filename=\"\(url.lastPathComponent)\"\(lineBreak)".data(using: .utf8)!)
+                let contentType = asset.mediaType == .video ? "video/mp4" : "image/jpeg"
+                bodyPrefix.append("Content-Type: \(contentType)\(lineBreak + lineBreak)".data(using: .utf8)!)
                 
-                let bodySuffix = "\r\n--\(boundary)--\r\n".data(using: .utf8)!
+                let bodySuffix = "\r\n--\(boundary)--\(lineBreak)".data(using: .utf8)!
                 
                 if useDirect {
                     // Direct upload via temporary combined file
                     let tempDataURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                     var fullData = Data()
-                    fullData.append(bodyPrefix)
+                    fullData.append(bodyPrefix as Data)
                     if let fileData = try? Data(contentsOf: url) { fullData.append(fileData) }
                     fullData.append(bodySuffix)
                     try? fullData.write(to: tempDataURL)
@@ -396,7 +397,7 @@ struct ContentView: View {
                     task.resume()
                     
                 } else {
-                    // Old temp file method with buffered streaming
+                    // Streamed upload with progress
                     let tempFileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                     guard FileManager.default.createFile(atPath: tempFileURL.path, contents: nil, attributes: nil) else {
                         DispatchQueue.main.async { progressHandler(0, true, true) }
@@ -408,14 +409,19 @@ struct ContentView: View {
                         outStream.open()
                         fileStream.open()
                         
+                        // Write body prefix
+                        let prefixData = bodyPrefix as Data
+                        prefixData.withUnsafeBytes { bytes in
+                            _ = outStream.write(bytes.bindMemory(to: UInt8.self).baseAddress!, maxLength: prefixData.count)
+                        }
+                        
+                        // Stream file data in chunks
                         let bufferSize = 1024 * 1024 // 1 MB
                         var buffer = [UInt8](repeating: 0, count: bufferSize)
                         let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
                         var totalBytes: Int64 = 0
                         var lastProgressUpdate: TimeInterval = 0
                         let throttleInterval: TimeInterval = 0.1
-                        
-                        bodyPrefix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodyPrefix.count) }
                         
                         while fileStream.hasBytesAvailable {
                             let read = fileStream.read(&buffer, maxLength: bufferSize)
@@ -427,10 +433,15 @@ struct ContentView: View {
                                     lastProgressUpdate = now
                                     DispatchQueue.main.async { progressHandler(Double(totalBytes)/Double(fileSize), false, false) }
                                 }
+                            } else {
+                                break
                             }
                         }
                         
-                        bodySuffix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodySuffix.count) }
+                        // Write body suffix
+                        bodySuffix.withUnsafeBytes { bytes in
+                            _ = outStream.write(bytes.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodySuffix.count)
+                        }
                         
                         outStream.close()
                         fileStream.close()
