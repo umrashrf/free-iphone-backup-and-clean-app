@@ -293,7 +293,7 @@ struct ContentView: View {
                 
                 bodyPrefix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodyPrefix.count) }
                 
-                let bufferSize = 64 * 1024
+                let bufferSize = 1024 * 1024 // 1 MB
                 var buffer = [UInt8](repeating: 0, count: bufferSize)
                 let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
                 var totalBytes: Int64 = 0
