@@ -128,17 +128,18 @@ struct ContentView: View {
             }
 
             let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
-            processAlbums(albums)
+
+            // First, process all albums
+            self.processAlbums(albums) {
+                // After all albums/videos are uploaded, process unassigned photos
+                self.uploadUnassignedPhotos()
+            }
         }
     }
 
-    func processAlbums(_ albums: PHFetchResult<PHAssetCollection>, index: Int = 0) {
+    func processAlbums(_ albums: PHFetchResult<PHAssetCollection>, index: Int = 0, completion: @escaping () -> Void = {}) {
         guard index < albums.count else {
-            DispatchQueue.main.async {
-                isUploading = false
-                statusMessage = "Backup completed"
-                UIApplication.shared.isIdleTimerDisabled = false
-            }
+            completion() // All albums done
             return
         }
 
@@ -160,12 +161,11 @@ struct ContentView: View {
 
         guard !assetsArray.isEmpty else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.processAlbums(albums, index: index + 1)
+                self.processAlbums(albums, index: index + 1, completion: completion)
             }
             return
         }
 
-        // Update UI state
         DispatchQueue.main.async {
             self.currentAlbumName = albumName
             self.totalPhotoCount += assetsArray.count
@@ -191,20 +191,15 @@ struct ContentView: View {
 
         filterGroup.notify(queue: .main) {
             guard !filteredAssets.isEmpty else {
-                self.processAlbums(albums, index: index + 1)
+                self.processAlbums(albums, index: index + 1, completion: completion)
                 return
             }
 
             self.totalToUpload += filteredAssets.count
 
-            // Process assets in batches
             self.processAssetsIncremental(filteredAssets, albumName: albumName) {
-                // After all assets (including retries) finish, delete album if needed
-                if self.deleteAfterUpload {
-                    self.deleteAlbum(album)
-                }
-                // Continue with next album
-                self.processAlbums(albums, index: index + 1)
+                if self.deleteAfterUpload { self.deleteAlbum(album) }
+                self.processAlbums(albums, index: index + 1, completion: completion)
             }
         }
     }
@@ -305,6 +300,49 @@ struct ContentView: View {
         }
 
         processNextBatch()
+    }
+    
+    func uploadUnassignedPhotos() {
+        let allAssets = PHAsset.fetchAssets(with: nil)
+        var assetsInAlbums = Set<String>()
+
+        let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
+        albums.enumerateObjects { album, _, _ in
+            let albumAssets = PHAsset.fetchAssets(in: album, options: nil)
+            albumAssets.enumerateObjects { asset, _, _ in
+                assetsInAlbums.insert(asset.localIdentifier)
+            }
+        }
+
+        var unassignedAssets: [PHAsset] = []
+        allAssets.enumerateObjects { asset, _, _ in
+            if !assetsInAlbums.contains(asset.localIdentifier) {
+                unassignedAssets.append(asset)
+            }
+        }
+
+        guard !unassignedAssets.isEmpty else {
+            DispatchQueue.main.async {
+                self.isUploading = false
+                self.statusMessage = "Backup completed"
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+            return
+        }
+
+        DispatchQueue.main.async {
+            self.currentAlbumName = "Unsorted"
+            self.totalPhotoCount += unassignedAssets.count
+            self.statusMessage = "Uploading unassigned photos"
+        }
+
+        self.processAssetsIncremental(unassignedAssets, albumName: "Unsorted") {
+            DispatchQueue.main.async {
+                self.isUploading = false
+                self.statusMessage = "Backup completed"
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+        }
     }
     
     func uploadAsset(asset: PHAsset, albumName: String, useDirect: Bool = true, progressHandler: @escaping (Double, Bool, Bool) -> Void) {
