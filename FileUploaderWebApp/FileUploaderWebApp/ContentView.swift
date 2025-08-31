@@ -220,29 +220,30 @@ struct ContentView: View {
                                     self.totalUploaded += 1
                                     self.uploadedFiles.insert(assetKey)
                                     self.saveUploadedFiles()
-                                    if self.deleteAfterUpload { /* delete asset if needed */ }
-                                }
-                                if failed {
-                                    // Retry logic
+                                    if self.deleteAfterUpload { /* delete asset */ }
+                                    semaphore.signal()
+                                    group.leave() // only leave after success
+                                } else if failed {
                                     let retries = self.retryCounts[assetKey] ?? 0
                                     if retries == 0 {
                                         self.retryCounts[assetKey] = 1
-                                        let delay = Double.random(in: 5...30) // random 5–30 sec
+                                        let delay = Double.random(in: 5...30)
                                         DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
-                                            startUpload()
+                                            startUpload() // retry without leaving the group yet
                                         }
                                     } else {
                                         self.uploadItems[index].isFailed = true
                                         self.totalUploaded += 1
+                                        semaphore.signal()
+                                        group.leave() // leave only after final failed attempt
                                     }
                                 }
                             } else if completed || failed {
+                                // asset not in visible list, count as finished
                                 self.totalUploaded += 1
+                                semaphore.signal()
+                                group.leave()
                             }
-                        }
-                        if completed || (failed && (self.retryCounts[assetKey] ?? 0) > 0) {
-                            semaphore.signal()
-                            group.leave()
                         }
                     }
                 }
