@@ -69,7 +69,12 @@ struct ContentView: View {
                 return
             }
             DispatchQueue.global(qos: .userInitiated).async {
-                DispatchQueue.main.async { isUploading = true; statusMessage = "Enumerating albums..." }
+                DispatchQueue.main.async {
+                    isUploading = true
+                    statusMessage = "Enumerating albums..."
+                    // Keep device awake while uploading
+                    UIApplication.shared.isIdleTimerDisabled = true
+                }
                 let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
                 processAlbums(albums)
             }
@@ -84,16 +89,20 @@ struct ContentView: View {
                 currentUploadProgress = 0
                 currentFileName = ""
                 stopAfterCurrent = false
+                // Allow sleep
+                UIApplication.shared.isIdleTimerDisabled = false
             }
             return
         }
-        if stopAfterCurrent { // Stop after finishing current album
+        if stopAfterCurrent {
             DispatchQueue.main.async {
                 isUploading = false
                 statusMessage = "Stopped"
                 currentUploadProgress = 0
                 currentFileName = ""
                 stopAfterCurrent = false
+                // Allow sleep
+                UIApplication.shared.isIdleTimerDisabled = false
             }
             return
         }
@@ -101,7 +110,7 @@ struct ContentView: View {
         let album = albums.object(at: index)
         let albumName = album.localizedTitle ?? "UnknownAlbum"
         let assets = PHAsset.fetchAssets(in: album, options: nil)
-
+        
         var videoAssets: [PHAsset] = []
         var photoAssets: [PHAsset] = []
         for i in 0..<assets.count {
@@ -110,7 +119,7 @@ struct ContentView: View {
             else if asset.mediaType == .image { photoAssets.append(asset) }
         }
         let combinedAssets = videoAssets + photoAssets
-
+        
         processAssetsSequentially(combinedAssets, albumName: albumName) {
             self.processAlbums(albums, index: index + 1)
         }
@@ -150,6 +159,8 @@ struct ContentView: View {
                     currentUploadProgress = 0
                     currentFileName = ""
                     stopAfterCurrent = false
+                    // Allow sleep
+                    UIApplication.shared.isIdleTimerDisabled = false
                 }
             } else {
                 self.processAssetsSequentially(assets, albumName: albumName, completion: completion, index: index + 1)
