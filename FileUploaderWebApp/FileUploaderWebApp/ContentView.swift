@@ -17,28 +17,40 @@ struct ContentView: View {
     @State private var uploadedFiles = Set<String>()
     @State private var deleteAfterUpload = false
     @State private var stopAfterCurrent = false
-    
-    @State private var uploadItems: [UploadItem] = [] // only active uploads
+    @State private var uploadItems: [UploadItem] = []  // all uploads
     @State private var totalToUpload: Int = 0
     @State private var totalUploaded: Int = 0
-    
-    @State private var retryCounts: [String: Int] = [:] // key = asset identifier
-    @State private var useDirectUpload = true // new toggle
-    
+    @State private var retryCounts: [String: Int] = [:]
+    @State private var useDirectUpload = true
+
+    // New UI state
+    @State private var currentAlbumName: String = ""
+    @State private var totalPhotoCount: Int = 0
+    @State private var albumUploadProgress: [String: Int] = [:]
+
     let serverURL = URL(string: "http://192.168.4.21:3001/upload")!
     let username = "admin"
     let password = "change_this_password"
-    
+
     var overallProgress: Double {
         guard totalToUpload > 0 else { return 0 }
         return Double(totalUploaded) / Double(totalToUpload)
     }
-    
+
     var body: some View {
         VStack(spacing: 20) {
             Text("iPhone → Mac Backup").font(.title)
+
+            // Display current album and total photos
+            if isUploading {
+                VStack(spacing: 4) {
+                    Text("Current Album: \(currentAlbumName)").foregroundColor(.gray)
+                    Text("Total Photos: \(totalPhotoCount)").foregroundColor(.gray)
+                }
+            }
+
             Text(statusMessage).foregroundColor(.gray)
-            
+
             if isUploading {
                 VStack(spacing: 16) {
                     VStack {
@@ -50,12 +62,12 @@ struct ContentView: View {
                             .frame(height: 8)
                             .accentColor(overallProgress >= 1.0 ? .green : .blue)
                     }.padding(.horizontal)
-                    
+
                     List {
-                        ForEach(uploadItems) { item in
+                        ForEach(uploadItems.prefix(20)) { item in
                             HStack {
                                 VStack(alignment: .leading) {
-                                    Text("\(item.albumName)/\(item.fileName)").lineLimit(1) // show AlbumName/FileName
+                                    Text("\(item.albumName)/\(item.fileName)").lineLimit(1)
                                     if !item.isCompleted && !item.isFailed {
                                         ProgressView(value: item.progress)
                                             .progressViewStyle(LinearProgressViewStyle())
@@ -68,7 +80,7 @@ struct ContentView: View {
                         }
                     }
                     .frame(height: 300)
-                    
+
                     Button("Stop After Current Batch") {
                         stopAfterCurrent = true
                     }
@@ -78,10 +90,10 @@ struct ContentView: View {
                     .cornerRadius(10)
                 }
             }
-            
+
             Toggle("Delete file after upload", isOn: $deleteAfterUpload).padding()
             Toggle("Use direct asset upload", isOn: $useDirectUpload).padding()
-            
+
             Button(action: startBackup) {
                 Text(isUploading ? "Uploading..." : "Start Backup")
                     .padding()
@@ -93,13 +105,17 @@ struct ContentView: View {
         .padding()
         .onAppear { loadUploadedFiles() }
     }
-    
+
     // MARK: - Backup Methods
-    
+
     func startBackup() {
         stopAfterCurrent = false
         totalToUpload = 0
         totalUploaded = 0
+        totalPhotoCount = 0
+        uploadItems = []
+        albumUploadProgress = [:]
+
         PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
             guard status == .authorized else {
                 DispatchQueue.main.async { statusMessage = "Full access required" }
@@ -110,12 +126,12 @@ struct ContentView: View {
                 statusMessage = "Enumerating albums..."
                 UIApplication.shared.isIdleTimerDisabled = true
             }
-            
+
             let albums = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
             processAlbums(albums)
         }
     }
-    
+
     func processAlbums(_ albums: PHFetchResult<PHAssetCollection>, index: Int = 0) {
         guard index < albums.count else {
             DispatchQueue.main.async {
@@ -142,14 +158,20 @@ struct ContentView: View {
         var assetsArray: [PHAsset] = []
         for i in 0..<assetsFetch.count { assetsArray.append(assetsFetch.object(at: i)) }
 
-        if assetsArray.isEmpty {
+        guard !assetsArray.isEmpty else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.processAlbums(albums, index: index + 1)
             }
             return
         }
 
-        // Filter assets with valid URL on background queue
+        // Update UI state
+        DispatchQueue.main.async {
+            self.currentAlbumName = albumName
+            self.totalPhotoCount += assetsArray.count
+            self.statusMessage = "Processing \(albumName)"
+        }
+
         let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = true
         var filteredAssets: [PHAsset] = []
