@@ -242,14 +242,12 @@ struct ContentView: View {
 
                 // Add to UI only if visible slots available
                 DispatchQueue.main.async {
-                    if self.uploadItems.count < 20 {
-                        let item = UploadItem(
-                            identifier: assetKey,
-                            albumName: albumName,
-                            fileName: asset.localIdentifier
-                        )
-                        self.uploadItems.insert(item, at: 0)
-                    }
+                    let item = UploadItem(
+                        identifier: assetKey,
+                        albumName: albumName,
+                        fileName: asset.localIdentifier
+                    )
+                    self.uploadItems.insert(item, at: 0)
                 }
 
                 func startUpload() {
