@@ -4,6 +4,7 @@ import Photos
 struct UploadItem: Identifiable, Hashable {
     let id = UUID()
     let identifier: String
+    let albumName: String
     let fileName: String
     var progress: Double = 0
     var isCompleted: Bool = false
@@ -54,7 +55,7 @@ struct ContentView: View {
                         ForEach(uploadItems) { item in
                             HStack {
                                 VStack(alignment: .leading) {
-                                    Text(item.fileName).lineLimit(1)
+                                    Text("\(item.albumName)/\(item.fileName)").lineLimit(1) // show AlbumName/FileName
                                     if !item.isCompleted && !item.isFailed {
                                         ProgressView(value: item.progress)
                                             .progressViewStyle(LinearProgressViewStyle())
@@ -220,7 +221,11 @@ struct ContentView: View {
                 // Add to UI only if visible slots available
                 DispatchQueue.main.async {
                     if self.uploadItems.count < 20 {
-                        let item = UploadItem(identifier: assetKey, fileName: asset.localIdentifier)
+                        let item = UploadItem(
+                            identifier: assetKey,
+                            albumName: albumName,
+                            fileName: asset.localIdentifier
+                        )
                         self.uploadItems.insert(item, at: 0)
                     }
                 }
