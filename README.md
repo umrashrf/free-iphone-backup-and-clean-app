@@ -1,3 +1,5 @@
+![](video.mov)
+
 ## How to run (quick guide)
 
 1. On your Mac, plug and mount your external drive (e.g. appears under /Volumes/MyDrive).
