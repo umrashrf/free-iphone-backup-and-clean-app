@@ -210,13 +210,11 @@ struct ContentView: View {
             let batchAssets = Array(assets[start..<end])
             currentBatch += 1
 
-            let semaphore = DispatchSemaphore(value: 3)
-            let group = DispatchGroup()
+            let uploadQueue = OperationQueue()
+            uploadQueue.maxConcurrentOperationCount = 3
+            uploadQueue.qualityOfService = .userInitiated
 
             for asset in batchAssets {
-                if stopAfterCurrent { break }
-                group.enter()
-
                 let assetKey = "\(albumName)/\(asset.localIdentifier)"
 
                 // Add to UI only if visible slots available
@@ -228,8 +226,9 @@ struct ContentView: View {
                 }
 
                 func startUpload() {
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        semaphore.wait()
+                    uploadQueue.addOperation {
+                        let semaphore = DispatchSemaphore(value: 0)
+
                         self.uploadAsset(asset: asset, albumName: albumName, useDirect: self.useDirectUpload) { progress, completed, failed in
                             DispatchQueue.main.async {
                                 if let index = self.uploadItems.firstIndex(where: { $0.identifier == assetKey }) {
@@ -243,38 +242,40 @@ struct ContentView: View {
                                         self.saveUploadedFiles()
                                         if self.deleteAfterUpload { /* delete asset */ }
                                         semaphore.signal()
-                                        group.leave()
                                     } else if failed {
                                         let retries = self.retryCounts[assetKey] ?? 0
                                         if retries == 0 {
                                             self.retryCounts[assetKey] = 1
                                             let delay = Double.random(in: 5...30)
                                             DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
-                                                startUpload() // retry
+                                                startUpload() // retry without leaving the queue
                                             }
                                         } else {
                                             self.uploadItems[index].isFailed = true
                                             self.totalUploaded += 1
                                             semaphore.signal()
-                                            group.leave()
                                         }
                                     }
                                 } else if completed || failed {
                                     self.totalUploaded += 1
                                     semaphore.signal()
-                                    group.leave()
                                 }
                             }
                         }
+
+                        // Wait until upload completes (or retry triggers new Operation)
+                        _ = semaphore.wait(timeout: .distantFuture)
                     }
                 }
 
                 startUpload()
             }
 
-            group.notify(queue: .main) {
-                // After this batch finishes, process the next one
-                processNextBatch()
+            // Notify when this batch finishes
+            uploadQueue.addBarrierBlock {
+                DispatchQueue.main.async {
+                    processNextBatch()
+                }
             }
         }
 
