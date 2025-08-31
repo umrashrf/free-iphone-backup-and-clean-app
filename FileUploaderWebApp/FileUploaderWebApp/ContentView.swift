@@ -142,11 +142,12 @@ struct ContentView: View {
         for i in 0..<assetsFetch.count { assetsArray.append(assetsFetch.object(at: i)) }
         
         if assetsArray.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.processAlbums(albums, index: index + 1) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.processAlbums(albums, index: index + 1)
+            }
             return
         }
         
-        // Filter assets with valid URL synchronously
         let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = true
         var filteredAssets: [PHAsset] = []
@@ -169,11 +170,14 @@ struct ContentView: View {
             }
             
             self.totalToUpload += filteredAssets.count
+            
+            // Process assets incrementally
             self.processAssetsIncremental(filteredAssets, albumName: albumName) {
-                // Delete the album after all assets uploaded if the toggle is enabled
+                // Delete album after all uploads (including retries) finish
                 if self.deleteAfterUpload {
                     self.deleteAlbum(album)
                 }
+                // Continue with next album
                 self.processAlbums(albums, index: index + 1)
             }
         }
@@ -189,7 +193,7 @@ struct ContentView: View {
     }
     
     func processAssetsIncremental(_ assets: [PHAsset], albumName: String, completion: @escaping () -> Void) {
-        let semaphore = DispatchSemaphore(value: 3)
+        let semaphore = DispatchSemaphore(value: 3) // limit concurrent uploads
         let group = DispatchGroup()
         
         for asset in assets {
@@ -198,10 +202,10 @@ struct ContentView: View {
             
             let assetKey = "\(albumName)/\(asset.localIdentifier)"
             
+            // Add or update UI
             DispatchQueue.main.async {
                 let item = UploadItem(identifier: assetKey, fileName: asset.localIdentifier)
                 self.uploadItems.insert(item, at: 0)
-                
                 if self.uploadItems.count > 20 {
                     self.uploadItems.removeLast(self.uploadItems.count - 20)
                 }
@@ -210,10 +214,12 @@ struct ContentView: View {
             func startUpload() {
                 DispatchQueue.global(qos: .userInitiated).async {
                     semaphore.wait()
+                    
                     self.uploadAsset(asset: asset, albumName: albumName, useDirect: self.useDirectUpload) { progress, completed, failed in
                         DispatchQueue.main.async {
                             if let index = self.uploadItems.firstIndex(where: { $0.identifier == assetKey }) {
                                 self.uploadItems[index].progress = progress
+                                
                                 if completed {
                                     self.uploadItems[index].isCompleted = true
                                     self.uploadItems[index].isFailed = false
@@ -221,25 +227,28 @@ struct ContentView: View {
                                     self.uploadedFiles.insert(assetKey)
                                     self.saveUploadedFiles()
                                     if self.deleteAfterUpload { /* delete asset */ }
+                                    
                                     semaphore.signal()
-                                    group.leave() // only leave after success
+                                    group.leave()
                                 } else if failed {
                                     let retries = self.retryCounts[assetKey] ?? 0
                                     if retries == 0 {
+                                        // Retry once after random delay
                                         self.retryCounts[assetKey] = 1
                                         let delay = Double.random(in: 5...30)
                                         DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
-                                            startUpload() // retry without leaving the group yet
+                                            startUpload() // retry without leaving group yet
                                         }
                                     } else {
+                                        // Final failure
                                         self.uploadItems[index].isFailed = true
                                         self.totalUploaded += 1
                                         semaphore.signal()
-                                        group.leave() // leave only after final failed attempt
+                                        group.leave()
                                     }
                                 }
                             } else if completed || failed {
-                                // asset not in visible list, count as finished
+                                // Asset not in visible list, count as finished
                                 self.totalUploaded += 1
                                 semaphore.signal()
                                 group.leave()
@@ -252,7 +261,9 @@ struct ContentView: View {
             startUpload()
         }
         
-        group.notify(queue: .main) { completion() }
+        group.notify(queue: .main) {
+            completion()
+        }
     }
     
     func uploadAsset(asset: PHAsset, albumName: String, useDirect: Bool = true, progressHandler: @escaping (Double, Bool, Bool) -> Void) {
