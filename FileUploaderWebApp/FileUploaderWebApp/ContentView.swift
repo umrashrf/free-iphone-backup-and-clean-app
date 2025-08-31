@@ -21,6 +21,8 @@ struct ContentView: View {
     @State private var totalToUpload: Int = 0
     @State private var totalUploaded: Int = 0
     
+    @State private var retryCounts: [String: Int] = [:] // key = asset identifier
+    
     let serverURL = URL(string: "http://192.168.4.21:3001/upload")!
     let username = "admin"
     let password = "change_this_password"
@@ -192,44 +194,59 @@ struct ContentView: View {
             if stopAfterCurrent { break }
             group.enter()
             
+            let assetKey = "\(albumName)/\(asset.localIdentifier)"
+            
             DispatchQueue.main.async {
-                let item = UploadItem(identifier: "\(albumName)/\(asset.localIdentifier)", fileName: asset.localIdentifier)
-                self.uploadItems.insert(item, at: 0) // prepend active upload
+                let item = UploadItem(identifier: assetKey, fileName: asset.localIdentifier)
+                self.uploadItems.insert(item, at: 0)
                 
-                // Limit visible list to 20 most recent items
                 if self.uploadItems.count > 20 {
                     self.uploadItems.removeLast(self.uploadItems.count - 20)
                 }
             }
             
-            DispatchQueue.global(qos: .userInitiated).async {
-                semaphore.wait()
-                self.uploadAsset(asset: asset, albumName: albumName) { progress, completed, failed in
-                    DispatchQueue.main.async {
-                        if let index = self.uploadItems.firstIndex(where: { $0.identifier == "\(albumName)/\(asset.localIdentifier)" }) {
-                            self.uploadItems[index].progress = progress
-                            if completed {
-                                self.uploadItems[index].isCompleted = true
+            func startUpload() {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    semaphore.wait()
+                    self.uploadAsset(asset: asset, albumName: albumName) { progress, completed, failed in
+                        DispatchQueue.main.async {
+                            if let index = self.uploadItems.firstIndex(where: { $0.identifier == assetKey }) {
+                                self.uploadItems[index].progress = progress
+                                if completed {
+                                    self.uploadItems[index].isCompleted = true
+                                    self.uploadItems[index].isFailed = false
+                                    self.totalUploaded += 1
+                                    self.uploadedFiles.insert(assetKey)
+                                    self.saveUploadedFiles()
+                                    if self.deleteAfterUpload { /* delete asset if needed */ }
+                                }
+                                if failed {
+                                    // Retry logic
+                                    let retries = self.retryCounts[assetKey] ?? 0
+                                    if retries == 0 {
+                                        self.retryCounts[assetKey] = 1
+                                        let delay = Double.random(in: 5...30) // random 5–30 sec
+                                        DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                                            startUpload()
+                                        }
+                                    } else {
+                                        self.uploadItems[index].isFailed = true
+                                        self.totalUploaded += 1
+                                    }
+                                }
+                            } else if completed || failed {
                                 self.totalUploaded += 1
-                                self.uploadedFiles.insert("\(albumName)/\(asset.localIdentifier)")
-                                self.saveUploadedFiles()
-                                if self.deleteAfterUpload { self.deleteAsset(asset: asset) }
                             }
-                            if failed {
-                                self.uploadItems[index].isFailed = true
-                                self.totalUploaded += 1
-                            }
-                        } else if completed || failed {
-                            // asset is no longer in visible list but still count towards overall
-                            self.totalUploaded += 1
                         }
-                    }
-                    if completed || failed {
-                        semaphore.signal()
-                        group.leave()
+                        if completed || (failed && (self.retryCounts[assetKey] ?? 0) > 0) {
+                            semaphore.signal()
+                            group.leave()
+                        }
                     }
                 }
             }
+            
+            startUpload()
         }
         
         group.notify(queue: .main) { completion() }
