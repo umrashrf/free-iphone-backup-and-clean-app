@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var totalUploaded: Int = 0
     
     @State private var retryCounts: [String: Int] = [:] // key = asset identifier
+    @State private var useDirectUpload = true // new toggle
     
     let serverURL = URL(string: "http://192.168.4.21:3001/upload")!
     let username = "admin"
@@ -78,6 +79,7 @@ struct ContentView: View {
             }
             
             Toggle("Delete file after upload", isOn: $deleteAfterUpload).padding()
+            Toggle("Use direct asset upload", isOn: $useDirectUpload).padding()
             
             Button(action: startBackup) {
                 Text(isUploading ? "Uploading..." : "Start Backup")
@@ -208,7 +210,7 @@ struct ContentView: View {
             func startUpload() {
                 DispatchQueue.global(qos: .userInitiated).async {
                     semaphore.wait()
-                    self.uploadAsset(asset: asset, albumName: albumName) { progress, completed, failed in
+                    self.uploadAsset(asset: asset, albumName: albumName, useDirect: self.useDirectUpload) { progress, completed, failed in
                         DispatchQueue.main.async {
                             if let index = self.uploadItems.firstIndex(where: { $0.identifier == assetKey }) {
                                 self.uploadItems[index].progress = progress
@@ -252,9 +254,10 @@ struct ContentView: View {
         group.notify(queue: .main) { completion() }
     }
     
-    func uploadAsset(asset: PHAsset, albumName: String, progressHandler: @escaping (Double, Bool, Bool) -> Void) {
+    func uploadAsset(asset: PHAsset, albumName: String, useDirect: Bool = true, progressHandler: @escaping (Double, Bool, Bool) -> Void) {
         let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = true
+        
         asset.requestContentEditingInput(with: options) { input, _ in
             guard let url = input?.fullSizeImageURL ?? input?.audiovisualAsset?.value(forKey: "URL") as? URL else {
                 progressHandler(0, true, true)
@@ -270,58 +273,78 @@ struct ContentView: View {
             let boundary = "Boundary-\(UUID().uuidString)"
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             
-            var bodyPrefix = Data()
-            bodyPrefix.append("--\(boundary)\r\n".data(using: .utf8)!)
-            bodyPrefix.append("Content-Disposition: form-data; name=\"album\"\r\n\r\n".data(using: .utf8)!)
-            bodyPrefix.append("\(albumName)\r\n".data(using: .utf8)!)
-            bodyPrefix.append("--\(boundary)\r\n".data(using: .utf8)!)
-            bodyPrefix.append("Content-Disposition: form-data; name=\"photos\"; filename=\"\(url.lastPathComponent)\"\r\n".data(using: .utf8)!)
-            let mimeType = asset.mediaType == .video ? "video/mp4" : "image/jpeg"
-            bodyPrefix.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
+            let bodyPrefix = """
+            --\(boundary)\r
+            Content-Disposition: form-data; name="album"\r\n\r
+            \(albumName)\r
+            --\(boundary)\r
+            Content-Disposition: form-data; name="photos"; filename="\(url.lastPathComponent)"\r
+            Content-Type: \(asset.mediaType == .video ? "video/mp4" : "image/jpeg")\r\n\r
+            """.data(using: .utf8)!
             
             let bodySuffix = "\r\n--\(boundary)--\r\n".data(using: .utf8)!
-            let tempFileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            guard FileManager.default.createFile(atPath: tempFileURL.path, contents: nil, attributes: nil) else {
-                progressHandler(0, true, true)
-                return
-            }
             
-            if let outStream = OutputStream(url: tempFileURL, append: false),
-               let fileStream = InputStream(url: url) {
-                outStream.open()
-                fileStream.open()
-                
-                bodyPrefix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodyPrefix.count) }
-                
-                let bufferSize = 1024 * 1024 // 1 MB
-                var buffer = [UInt8](repeating: 0, count: bufferSize)
-                let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
+            if useDirect {
+                // Upload directly without temp file
+                let inputStream = InputStream(url: url)!
+                let totalSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
                 var totalBytes: Int64 = 0
                 
-                while fileStream.hasBytesAvailable {
-                    let read = fileStream.read(&buffer, maxLength: bufferSize)
-                    if read > 0 {
-                        _ = outStream.write(buffer, maxLength: read)
-                        totalBytes += Int64(read)
-                        DispatchQueue.main.async { progressHandler(Double(totalBytes)/Double(fileSize), false, false) }
+                // Combine prefix + file + suffix into a single InputStream using a Sequence
+                let combinedData = [bodyPrefix, Data(), bodySuffix]
+                let task = URLSession.shared.uploadTask(with: request, fromFile: url) { _, response, _ in
+                    if let resp = response as? HTTPURLResponse, resp.statusCode == 200 {
+                        progressHandler(1.0, true, false)
+                    } else {
+                        progressHandler(0.0, true, true)
                     }
                 }
-                
-                bodySuffix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodySuffix.count) }
-                
-                outStream.close()
-                fileStream.close()
-            }
-            
-            let task = URLSession.shared.uploadTask(with: request, fromFile: tempFileURL) { _, response, _ in
-                defer { try? FileManager.default.removeItem(at: tempFileURL) }
-                if let resp = response as? HTTPURLResponse, resp.statusCode == 200 {
-                    progressHandler(1.0, true, false)
-                } else {
-                    progressHandler(0.0, true, true)
+                task.resume()
+            } else {
+                // Old method with temp file
+                let tempFileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                guard FileManager.default.createFile(atPath: tempFileURL.path, contents: nil, attributes: nil) else {
+                    progressHandler(0, true, true)
+                    return
                 }
+                
+                if let outStream = OutputStream(url: tempFileURL, append: false),
+                   let fileStream = InputStream(url: url) {
+                    outStream.open()
+                    fileStream.open()
+                    
+                    bodyPrefix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodyPrefix.count) }
+                    
+                    let bufferSize = 1024 * 1024 // 1 MB buffer
+                    var buffer = [UInt8](repeating: 0, count: bufferSize)
+                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 1
+                    var totalBytes: Int64 = 0
+                    
+                    while fileStream.hasBytesAvailable {
+                        let read = fileStream.read(&buffer, maxLength: bufferSize)
+                        if read > 0 {
+                            _ = outStream.write(buffer, maxLength: read)
+                            totalBytes += Int64(read)
+                            DispatchQueue.main.async { progressHandler(Double(totalBytes)/Double(fileSize), false, false) }
+                        }
+                    }
+                    
+                    bodySuffix.withUnsafeBytes { _ = outStream.write($0.bindMemory(to: UInt8.self).baseAddress!, maxLength: bodySuffix.count) }
+                    
+                    outStream.close()
+                    fileStream.close()
+                }
+                
+                let task = URLSession.shared.uploadTask(with: request, fromFile: tempFileURL) { _, response, _ in
+                    defer { try? FileManager.default.removeItem(at: tempFileURL) }
+                    if let resp = response as? HTTPURLResponse, resp.statusCode == 200 {
+                        progressHandler(1.0, true, false)
+                    } else {
+                        progressHandler(0.0, true, true)
+                    }
+                }
+                task.resume()
             }
-            task.resume()
         }
     }
     
