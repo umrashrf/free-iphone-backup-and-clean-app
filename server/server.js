@@ -87,6 +87,7 @@ app.post('/upload', upload.array('photos', 500), (req, res) => {
         size: f.size,
         path: f.path
     }));
+    console.log('Files saved', saved);
     res.json({ success: true, files: saved });
 });
 
