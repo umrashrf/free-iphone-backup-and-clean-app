@@ -1,4 +1,4 @@
-![](video.mov)
+![](video.gif)
 
 ## How to run (quick guide)
 
