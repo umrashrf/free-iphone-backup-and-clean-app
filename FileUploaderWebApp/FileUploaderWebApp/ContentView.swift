@@ -102,7 +102,7 @@ struct ContentView: View {
             }.disabled(isUploading)
         }
         .padding()
-        .onAppear { loadUploadedFiles() }
+        .onAppear {}
     }
 
     // MARK: - Backup Methods
